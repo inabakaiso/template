@@ -7,10 +7,10 @@ data:
   input_dir_path: "../input"
 cv_strategy:
   seed: 42
-  num_split: 5
+  num_split: 4
   shuffle: true
 model:
-  model_name: "microsoft/deberta-v3-large"
+  model_name: "microsoft/deberta-v3-base"
   target_size: 3
 tokenizer:
   tokenizer_name: ${model.model_name}
@@ -20,10 +20,11 @@ dataset:
   max_len: 512
   train: true
 scheduler:
-  scheduler_name: "cosine"
+  scheduler_name: "Cosine_Annealing"
   num_warmup_steps: 0
   num_cycles: 0.5
 training:
+  dropout: 0.2
   debug: false
   batch_scheduler: true
   gradient_checkpoint: false
@@ -33,12 +34,13 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1000
   eps: 0.000001
-  min_lr: 0.00003
+  min_lr: 0.0000001
+  t_0: 500
   encoder_lr: 0.00002
   decoder_lr: 0.00002
   print_freq: 50
-  gradient_accumulation_steps: 2
-  accumulation_steps: 2
+  gradient_accumulation_steps: 1
+  accumulation_steps: 1
   gpu_optimize_config:
     fp16: true
     freezing: true

@@ -8,15 +8,19 @@ class FeedbackDataset(Dataset):
         self.target = df['target'].values
         self.tokenizer = tokenizer
         self.discourse_id = df['discourse_id']
+        self.essay = df['essay_text']
 
     def __len__(self):
         return len(self.text)
 
     def __getitem__(self, item):
+        
         inputs = self.tokenizer.encode_plus(
                         self.text[item],
+                        self.essay[item],
                         truncation=True,
                         add_special_tokens=True,
+                        return_token_type_ids = True,
                         max_length=self.cfg.dataset.max_len
                     )
         samples = {
@@ -27,7 +31,6 @@ class FeedbackDataset(Dataset):
 
         if 'token_type_ids' in inputs:
             samples['token_type_ids'] = inputs['token_type_ids']
-        
         return samples
 
 class Collate:

@@ -1,6 +1,7 @@
 from src.pachage_list import *
 from src.utils import *
 from dataset.dataset import *
+from src.train_function import *
 from model.model import *
 from typing import Optional
 import yaml
@@ -26,10 +27,10 @@ def train_loop(cfg, df, fold):
                      group=cfg.model.model_name,
                      job_type="train",
                      anonymous=anony)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name)
     SEP = tokenizer.sep_token
 
-    df['text'] = df['discourse_type'] + ' ' + df['discourse_text'] + SEP + df['essay_text']
+    df['text'] = df['discourse_type'] + ' ' + df['discourse_text']
     # DataSet Preparation
     train_df = df[df["kfold"] != fold].reset_index(drop=True)
     valid_df = df[df["kfold"] == fold].reset_index(drop=True)
@@ -38,7 +39,7 @@ def train_loop(cfg, df, fold):
     train_dataset = FeedbackDataset(cfg, train_df, tokenizer=tokenizer)
     valid_dataset = FeedbackDataset(cfg, valid_df ,tokenizer=tokenizer)
 
-    collate_fn = Collate(tokenizer, cfg)
+    collate_fn = Collate(tokenizer)
 
     train_loader = DataLoader(train_dataset,
                               batch_size=cfg.dataset.batch_size,
@@ -59,6 +60,7 @@ def train_loop(cfg, df, fold):
     model.to(device)
 
     def get_optimizer_params(model, encoder_lr, decoder_lr, weight_decay=0.0):
+            param_optimizer = list(model.named_parameters())
             no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
             optimizer_parameters = [
                 {'params': [p for n, p in model.model.named_parameters() if not any(nd in n for nd in no_decay)],
@@ -71,14 +73,15 @@ def train_loop(cfg, df, fold):
             return optimizer_parameters
 
     optimizer_parameters = get_optimizer_params(model,
-                                                encoder_lr=cfg.training.encoder_lr,
+                                                encoder_lr=cfg.training.encoder_lr, 
                                                 decoder_lr=cfg.training.decoder_lr,
                                                 weight_decay=cfg.training.weight_decay)
+    optimizer = AdamW(optimizer_parameters, lr=cfg.training.encoder_lr, eps=cfg.training.eps, betas=(0.9, 0.999))
 
-    optimizer = AdamW(optimizer_parameters, 
-                      lr=cfg.training.encoder_lr,
-                      eps=cfg.training.eps, 
-                      betas=(0.9, 0.999))    
+    # optimizer = AdamW(model.parameters(), 
+    #                   lr=cfg.training.encoder_lr,
+    #                   eps=cfg.training.eps, 
+    #                   betas=(0.9, 0.999))  
 
     # ====================================================
     # scheduler
@@ -92,13 +95,16 @@ def train_loop(cfg, df, fold):
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer, num_warmup_steps=cfg.scheduler.num_warmup_steps, num_training_steps=num_train_steps, num_cycles=cfg.scheduler.num_cycles
             )
+        else:
+            scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=cfg.training.t_0, 
+                                                             eta_min=cfg.training.min_lr)
         return scheduler
     
     num_train_steps = int(cfg.cv_strategy.num_split / cfg.training.batch_size * cfg.training.epochs)
     scheduler = get_scheduler(cfg, optimizer, num_train_steps)
     criterion = nn.CrossEntropyLoss()
 
-    best_score = 0.
+    best_score = 100.
     for epoch in range(cfg.training.epochs):
         start_time = time.time()
         avg_loss = train_fn(cfg, fold, train_loader, model, criterion, optimizer, epoch, scheduler, device)
@@ -117,7 +123,7 @@ def train_loop(cfg, df, fold):
                     f"[fold{fold}] avg_val_loss": avg_val_loss,
                     f"[fold{fold}] score": score})
         
-        if best_score < score:
+        if best_score > score:
             best_score = score
             LOGGER.info(f'Epoch {epoch+1} - Save Best Score: {best_score:.4f} Model')
             torch.save({'model': model.state_dict(),
@@ -126,84 +132,13 @@ def train_loop(cfg, df, fold):
 
     predictions = torch.load(cfg.data.output_dir_path + "/" + f"{cfg.model.model_name.replace('/', '-')}_fold{fold}_best.pth", 
                              map_location=torch.device('cpu'))['predictions']
+    
     valid_df[['pred_0','pred_1','pred_2']] = predictions
 
     torch.cuda.empty_cache()
     gc.collect()
     
     return valid_df
-
-def train_fn(cfg, fold, train_loader, model, criterion, optimizer, epoch, scheduler, device):
-    model.train()
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.apex)
-    losses = AverageMeter()
-    start = end = time.time()
-    global_step = 0
-    for step, inputs in enumerate(train_loader):
-        input_ids = inputs["input_ids"].to(device)
-        attention_mask = inputs["attention_mask"].to(device)
-        labels = inputs["target"].to(device)
-        batch_size = labels.size(0)
-        with torch.cuda.amp.autocast(enabled=cfg.training.apex):
-            y_preds, loss, metrics = model(ids=input_ids, mask=attention_mask, targets=labels)
-        if cfg.training.gradient_accumulation_steps > 1:
-            loss = loss / cfg.training.gradient_accumulation_steps
-        losses.update(loss.item(), batch_size)
-        scaler.scale(loss).backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.max_grad_norm)
-        if (step + 1) % cfg.training.gradient_accumulation_steps == 0:
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            global_step += 1
-            if cfg.training.batch_scheduler:
-                scheduler.step()
-        end = time.time()
-        if step % cfg.training.print_freq == 0 or step == (len(train_loader)-1):
-            print('Epoch: [{0}][{1}/{2}] '
-                  'Elapsed {remain:s} '
-                  'Loss: {loss.val:.4f}({loss.avg:.4f}) '
-                  'Grad: {grad_norm:.4f}  '
-                  'LR: {lr:.8f}  '
-                  .format(epoch+1, step, len(train_loader), 
-                          remain=timeSince(start, float(step+1)/len(train_loader)),
-                          loss=losses,
-                          grad_norm=grad_norm,
-                          lr=scheduler.get_last_lr()[0]))
-        wandb.log({f"[fold{fold}] loss": losses.val,
-                    f"[fold{fold}] lr": scheduler.get_last_lr()[0]})
-    return losses.avg
-
-def valid_fn(cfg, valid_loader, model, criterion, device):
-    losses = AverageMeter()
-    model.eval()
-    preds = []
-    labels = []
-    start = end = time.time()
-    for step, inputs in enumerate(valid_loader):
-        input_ids = inputs["input_ids"].to(device)
-        attention_mask = inputs["attention_mask"].to(device)
-        label = inputs["target"].to(device)
-        batch_size = label.size(0)
-        with torch.no_grad():
-            y_preds, loss, metric = model(ids=input_ids, mask=attention_mask, targets=label)
-        if cfg.training.gradient_accumulation_steps > 1:
-            loss = loss / cfg.training.gradient_accumulation_steps
-        losses.update(loss.item(), batch_size)
-        preds.append(y_preds.to('cpu').numpy())
-        labels.append(label.to('cpu').numpy())
-        end = time.time()
-        if step % cfg.training.print_freq == 0 or step == (len(valid_loader)-1):
-            print('EVAL: [{0}/{1}] '
-                  'Elapsed {remain:s} '
-                  'Loss: {loss.val:.4f}({loss.avg:.4f}) '
-                  'Metric: {metric:.4f}'
-                  .format(step, len(valid_loader),
-                          loss=losses,
-                          remain=timeSince(start, float(step+1)/len(valid_loader)), metric=metric))
-    predictions = np.concatenate(preds)
-    return losses.avg, predictions
-
 
 if __name__ == "__main__":
     with open('train_config.yaml', 'r') as yml:
@@ -216,15 +151,27 @@ if __name__ == "__main__":
     df['essay_text'] = df['essay_id'].apply(lambda x: get_essay(x, is_train=True))
     df['discourse_text'] = df['discourse_text'].apply(lambda x: resolve_encodings_and_normalize(x))
     df['essay_text'] = df['essay_text'].apply(lambda x: resolve_encodings_and_normalize(x))
+    df['essay_text'] = df['essay_text'].str.lower()
+    df['discourse_text'] = df['discourse_text'].str.lower()
+    df['discourse_type'] = df['discourse_type'].str.lower()
     df['target'] = df['discourse_effectiveness'].map(LABEL_MAPPING)
+    df['grp_var'] = df['discourse_type'] + df['discourse_effectiveness']
     ## debug flag
     if cfg.training.debug:
         df = df[:1000]
     
     ## make fold
-    gkf = GroupKFold(n_splits=cfg.cv_strategy.num_split)
-    for fold, ( _, val_) in enumerate(gkf.split(X=df, groups=df.essay_id)):
-        df.loc[val_ , "kfold"] = int(fold)
+    # gkf = StratifiedGroupKFold(n_splits=cfg.cv_strategy.num_split)
+    # for fold, ( _, val_) in enumerate(gkf.split(df.grp_var,df.essay_id)):
+    #     df.loc[val_ , "kfold"] = int(fold)
+    # gkf = KFold(n_splits=CFG.n_fold)
+
+    # gkf = GroupKFold(n_splits=CFG.n_fold)
+    gkf = StratifiedKFold(n_splits=cfg.cv_strategy.num_split, shuffle=True, random_state=cfg.cv_strategy.seed)
+    # gkf = StratifiedGroupKFold(n_splits=CFG.n_fold)
+    for fold, (train_id, val_id) in enumerate(gkf.split(X=df, y=df.discourse_effectiveness, groups=df.essay_id)):
+        # For all row in val_id list => create kfold column value
+        df.loc[val_id , "kfold"] = fold
 
     df["kfold"] = df["kfold"].astype(int)
     LOGGER.info(df.groupby('kfold')['discourse_effectiveness'].value_counts())

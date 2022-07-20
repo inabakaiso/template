@@ -148,11 +148,43 @@ def softmax(z):
 
 def get_score(y_true, y_pred):
     y_pred = softmax(y_pred)
-    score = log_loss(y_true, y_pred, labels=[0, 1, 2])
+    score = log_loss(y_true, y_pred)
     return round(score, 5)
 
 def get_result(oof_df):
-    labels = oof_df['discourse_effectiveness'].values
+    labels = oof_df['target'].values
     preds = oof_df[['pred_0','pred_1','pred_2']].values
     score = get_score(labels, preds)
     LOGGER.info(f'Score: {score:<.4f}')
+
+def freeze(module):
+    """
+    Freezes module's parameters.
+    """
+    for parameter in module.parameters():
+        parameter.requires_grad = False
+
+def get_freezed_parameters(module):
+    """
+    Returns names of freezed parameters of the given module.
+    """
+    freezed_parameters = []
+    for name, parameter in module.named_parameters():
+        if not parameter.requires_grad:
+            freezed_parameters.append(name)
+            
+    return freezed_parameters
+
+# 8-bits optimizer
+def set_embedding_parameters_bits(embeddings_path, optim_bits=32):
+    """
+    https://github.com/huggingface/transformers/issues/14819#issuecomment-1003427930
+    """
+    embedding_types = ("word", "position", "token_type")
+    for embedding_type in embedding_types:
+        attr_name = f"{embedding_type}_embeddings"
+        
+        if hasattr(embeddings_path, attr_name): 
+            bnb.optim.GlobalOptimManager.get_instance().register_module_override(
+                getattr(embeddings_path, attr_name), 'weight', {'optim_bits': optim_bits}
+            )

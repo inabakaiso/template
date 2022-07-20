@@ -1,3 +1,4 @@
+from msilib import sequence
 from src.pachage_list import *
 
 class MeanPooling(nn.Module):
@@ -78,7 +79,8 @@ class CustomModel(nn.Module):
             print(f"Gradient Checkpointing: {self.model.is_gradient_checkpointing}")
             
         
-        # self.pooler = MeanPooling()
+        self.pooler = MeanPooling()
+        self.context_pooler = ContextPooler(self.config)
         
         self.bilstm = nn.LSTM(self.config.hidden_size, (self.config.hidden_size) // 2, num_layers=2, 
                               dropout=self.config.hidden_dropout_prob, batch_first=True,
@@ -95,13 +97,6 @@ class CustomModel(nn.Module):
             nn.Linear(self.config.hidden_size, self.cfg.model.target_size)
             # nn.Linear(256, self.cfg.target_size)
         )
-        
-        
-
-    def loss(self, outputs, targets):
-        loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(outputs, targets)
-        return loss
     
     def monitor_metrics(self, outputs, targets):
         device = targets.get_device()
@@ -127,18 +122,21 @@ class CustomModel(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-    def forward(self, ids, mask, token_type_ids=None, targets=None):
-        if token_type_ids:
-            transformer_out = self.model(ids, mask, token_type_ids)
-        else:
-            transformer_out = self.model(ids, mask)
-        
-        # LSTM/GRU header
-#         all_hidden_states = torch.stack(transformer_out[1])
-#         sequence_output = self.pooler(all_hidden_states)
-        
+    def mean_pooling(self, out, mask, targets=None):
+        outputs = self.pooler(out.last_hidden_state, mask)
+        outputs = self.dropout(outputs)
+        outputs = self.output(outputs)
+        if targets is not None:
+            # loss = self.loss(outputs, targets)
+            outputs = nn.Softmax(dim=1)(outputs)
+            metric = self.monitor_metrics(outputs, targets)
+            return outputs, metric
+        return outputs, {}
+    
+    def multi_dropout(self, out, targets=None):
         # simple CLS
-        sequence_output = transformer_out[0][:, 0, :]
+        # sequence_output = out[0][:, 0, :]
+        sequence_output = out
 
         
         # Main task
@@ -149,14 +147,41 @@ class CustomModel(nn.Module):
         logits5 = self.output(self.dropout5(sequence_output))
         logits = (logits1 + logits2 + logits3 + logits4 + logits5) / 5
         if targets is not None:
-            loss1 = self.loss(logits1, targets)
-            loss2 = self.loss(logits2, targets)
-            loss3 = self.loss(logits3, targets)
-            loss4 = self.loss(logits4, targets)
-            loss5 = self.loss(logits5, targets)
-            loss = (loss1 + loss2 + loss3 + loss4 + loss5) / 5
+            # loss = self.loss(logits, targets=targets)
+            # loss1 = self.loss(logits1, targets)
+            # loss2 = self.loss(logits2, targets)
+            # loss3 = self.loss(logits3, targets)
+            # loss4 = self.loss(logits4, targets)
+            # loss5 = self.loss(logits5, targets)
+            # loss = (loss1 + loss2 + loss3 + loss4 + loss5) / 5
             output = nn.Softmax(dim=1)(logits)
             metric = self.monitor_metrics(output, targets)
-            return logits, loss, metric
+            return logits, metric
+        return logits, {}
 
-        return logits, loss, {}
+    def forward(self, ids, mask, token_type_ids=None, targets=None):
+        if token_type_ids:
+            out = self.model(ids, mask, token_type_ids)
+        else:
+            out = self.model(ids, mask)
+        out = self.context_pooler(out[0])
+        ## pooler: Mean pooling ##############################
+        # out, loss, metric = self.mean_pooling(out, mask, targets)
+        # return out, loss, metric
+        #######################################################
+
+        ## multi dropout #####################################
+        out, metric = self.multi_dropout(out, targets)
+        return out, metric
+        # ####################################################
+        
+        ## pooler: LSTM pooling ##############################
+        # LSTM/GRU header
+#         all_hidden_states = torch.stack(transformer_out[1])
+#         sequence_output = self.pooler(all_hidden_states)
+        ######################################################
+
+def inplace_relu(m):
+    classname = m.__class__.__name__
+    if classname.find('ReLU') != -1:
+        m.inplace=True
