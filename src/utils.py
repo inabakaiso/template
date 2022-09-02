@@ -56,86 +56,6 @@ def seed_everything(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
-def _prepare_training_data_helper(cfg, tokenizer, df, is_train):
-    training_samples = []
-    for _, row in tqdm(df.iterrows(), total=len(df)):
-        idx = row["essay_id"]
-        discourse_text = row["discourse_text"]
-        discourse_type = row["discourse_type"]
-
-        if is_train:
-            filename = os.path.join(cfg.data.input_dir_path, "train", idx + ".txt")
-        else:
-            filename = os.path.join(cfg.data.input_dir_path, "test", idx + ".txt")
-
-        with open(filename, "r", encoding="utf-8") as f:
-            text = f.read()
-
-        encoded_text = tokenizer.encode_plus(
-            discourse_type + " " + discourse_text,
-            text,
-            add_special_tokens=False,
-        )
-        input_ids = encoded_text["input_ids"]
-        sample = {
-            "discourse_id": row["discourse_id"],
-            "input_ids": input_ids,
-            # "discourse_text": discourse_text,
-            # "essay_text": text,
-            # "mask": encoded_text["attention_mask"],
-        }
-
-        if "token_type_ids" in encoded_text:
-            sample["token_type_ids"] = encoded_text["token_type_ids"]
-
-        label = row["discourse_effectiveness"]
-
-        sample["label"] = LABEL_MAPPING[label]
-
-        training_samples.append(sample)
-    return training_samples
-
-
-def prepare_training_data(df, tokenizer, cfg, num_jobs, is_train):
-    training_samples = []
-
-    df_splits = np.array_split(df, num_jobs)
-
-    results = Parallel(n_jobs=num_jobs, backend="multiprocessing")(
-        delayed(_prepare_training_data_helper)(cfg, tokenizer, df, is_train) for df in df_splits
-    )
-    for result in results:
-        training_samples.extend(result)
-
-    return training_samples
-
-def replace_encoding_with_utf8(error: UnicodeError) -> Tuple[bytes, int]:
-    return error.object[error.start : error.end].encode("utf-8"), error.end
-
-
-def replace_decoding_with_cp1252(error: UnicodeError) -> Tuple[str, int]:
-    return error.object[error.start : error.end].decode("cp1252"), error.end
-
-# Register the encoding and decoding error handlers for `utf-8` and `cp1252`.
-codecs.register_error("replace_encoding_with_utf8", replace_encoding_with_utf8)
-codecs.register_error("replace_decoding_with_cp1252", replace_decoding_with_cp1252)
-
-def resolve_encodings_and_normalize(text: str) -> str:
-    """Resolve the encoding problems and normalize the abnormal characters."""
-    text = (
-        text.encode("raw_unicode_escape")
-        .decode("utf-8", errors="replace_decoding_with_cp1252")
-        .encode("cp1252", errors="replace_encoding_with_utf8")
-        .decode("utf-8", errors="replace_decoding_with_cp1252")
-    )
-    text = unidecode(text)
-    return text
-
-def get_essay(essay_id, is_train=True):
-    parent_path = '../input/' + 'train' if is_train else INPUT_DIR + 'test'
-    essay_path = os.path.join(parent_path, f"{essay_id}.txt")
-    essay_text = open(essay_path, 'r', encoding='utf-8').read()
-    return essay_text
 
 def softmax(z):
     assert len(z.shape) == 2
@@ -146,45 +66,24 @@ def softmax(z):
     div = div[:, np.newaxis] # dito
     return e_x / div
 
-def get_score(y_true, y_pred):
-    y_pred = softmax(y_pred)
-    score = log_loss(y_true, y_pred)
-    return round(score, 5)
+def MCRMSE(y_trues, y_preds):
+    scores = []
+    idxes = y_trues.shape[1]
+    for i in range(idxes):
+        y_true = y_trues[:,i]
+        y_pred = y_preds[:,i]
+        score = mean_squared_error(y_true, y_pred, squared=False) # RMSE
+        scores.append(score)
+    mcrmse_score = np.mean(scores)
+    return mcrmse_score, scores
 
-def get_result(oof_df):
-    labels = oof_df['target'].values
-    preds = oof_df[['pred_0','pred_1','pred_2']].values
-    score = get_score(labels, preds)
-    LOGGER.info(f'Score: {score:<.4f}')
 
-def freeze(module):
-    """
-    Freezes module's parameters.
-    """
-    for parameter in module.parameters():
-        parameter.requires_grad = False
+def get_score(y_trues, y_preds):
+    mcrmse_score, scores = MCRMSE(y_trues, y_preds)
+    return mcrmse_score, scores
 
-def get_freezed_parameters(module):
-    """
-    Returns names of freezed parameters of the given module.
-    """
-    freezed_parameters = []
-    for name, parameter in module.named_parameters():
-        if not parameter.requires_grad:
-            freezed_parameters.append(name)
-            
-    return freezed_parameters
-
-# 8-bits optimizer
-def set_embedding_parameters_bits(embeddings_path, optim_bits=32):
-    """
-    https://github.com/huggingface/transformers/issues/14819#issuecomment-1003427930
-    """
-    embedding_types = ("word", "position", "token_type")
-    for embedding_type in embedding_types:
-        attr_name = f"{embedding_type}_embeddings"
-        
-        if hasattr(embeddings_path, attr_name): 
-            bnb.optim.GlobalOptimManager.get_instance().register_module_override(
-                getattr(embeddings_path, attr_name), 'weight', {'optim_bits': optim_bits}
-            )
+def get_result(oof_df, target_cols=['cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar', 'conventions']):
+    labels = oof_df[target_cols].values
+    preds = oof_df[[f"pred_{c}" for c in target_cols]].values
+    score, scores = get_score(labels, preds)
+    return score, scores

@@ -1,7 +1,7 @@
 data:
   train_data_path: "../input/train.csv"
   test_data_path: "../input/train.csv"
-  train_txt_path: "../input/train"
+  train_txt_path: "../input/2022/train"
   test_txt_path: "../input/test"
   output_dir_path: "output"
   input_dir_path: "../input"
@@ -11,7 +11,6 @@ cv_strategy:
   shuffle: true
 model:
   model_name: "microsoft/deberta-v3-base"
-  target_size: 3
 tokenizer:
   tokenizer_name: ${model.model_name}
 dataset:
@@ -19,17 +18,18 @@ dataset:
   num_workers: 4
   max_len: 512
   train: true
+  target_cols: ['cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar', 'conventions']
 scheduler:
-  scheduler_name: "Cosine_Annealing"
+  scheduler_name: "cosine"
   num_warmup_steps: 0
   num_cycles: 0.5
 training:
   dropout: 0.2
   debug: false
   batch_scheduler: true
-  gradient_checkpoint: false
+  gradient_checkpoint: true
   apex: true
-  epochs: 5
+  epochs: 4
   batch_size: ${dataset.batch_size}
   weight_decay: 0.01
   max_grad_norm: 1000
@@ -38,7 +38,7 @@ training:
   t_0: 500
   encoder_lr: 0.00002
   decoder_lr: 0.00002
-  print_freq: 50
+  print_freq: 20
   gradient_accumulation_steps: 1
   accumulation_steps: 1
   gpu_optimize_config:

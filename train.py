@@ -2,6 +2,7 @@ from src.pachage_list import *
 from src.utils import *
 from dataset.dataset import *
 from src.train_function import *
+from src.preprocess import *
 from model.model import *
 from typing import Optional
 import yaml
@@ -21,7 +22,7 @@ def train_loop(cfg, df, fold):
     def class2dict(f):
         return dict((name, getattr(f, name)) for name in dir(f) if not name.startswith('__'))
 
-    run = wandb.init(project='FeedBack-Prize', 
+    run = wandb.init(project='Final-FeedBack-Prize', 
                      name=cfg.model.model_name,
                      config=class2dict(cfg),
                      group=cfg.model.model_name,
@@ -30,47 +31,51 @@ def train_loop(cfg, df, fold):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name)
     SEP = tokenizer.sep_token
 
-    df['text'] = df['discourse_type'] + ' ' + df['discourse_text']
+    lengths = []
+    tk0 = tqdm(df['full_text'].fillna("").values, total=len(df))
+    for text in tk0:
+        length = len(tokenizer(text, add_special_tokens=False)['input_ids'])
+        lengths.append(length)
+    max_len = max(lengths) + 3 # cls & sep & sep
+    LOGGER.info(f"max_len: {max_len}")
+
     # DataSet Preparation
     train_df = df[df["kfold"] != fold].reset_index(drop=True)
     valid_df = df[df["kfold"] == fold].reset_index(drop=True)
-    valid_labels = valid_df['target'].values
+    valid_labels = valid_df[cfg.dataset.target_cols].values
 
-    train_dataset = FeedbackDataset(cfg, train_df, tokenizer=tokenizer)
-    valid_dataset = FeedbackDataset(cfg, valid_df ,tokenizer=tokenizer)
-
-    collate_fn = Collate(tokenizer)
+    train_dataset = FeedbackDataset(cfg, train_df, max_len, tokenizer=tokenizer)
+    valid_dataset = FeedbackDataset(cfg, valid_df ,max_len ,tokenizer=tokenizer)
 
     train_loader = DataLoader(train_dataset,
                               batch_size=cfg.dataset.batch_size,
                               shuffle=True,
-                              collate_fn=collate_fn,
                               num_workers=cfg.dataset.num_workers, pin_memory=True, drop_last=True)
     valid_loader = DataLoader(valid_dataset,
-                              batch_size=cfg.dataset.batch_size,
+                              batch_size=cfg.dataset.batch_size * 2,
                               shuffle=False,
-                              collate_fn=collate_fn,
                               num_workers=cfg.dataset.num_workers, pin_memory=True, drop_last=False)
 
     # Model Preparation
     model = CustomModel(
         cfg=cfg,
+        config_path=None,
         pretrained=True
     )
     model.to(device)
 
     def get_optimizer_params(model, encoder_lr, decoder_lr, weight_decay=0.0):
-            param_optimizer = list(model.named_parameters())
-            no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-            optimizer_parameters = [
-                {'params': [p for n, p in model.model.named_parameters() if not any(nd in n for nd in no_decay)],
-                'lr': encoder_lr, 'weight_decay': weight_decay},
-                {'params': [p for n, p in model.model.named_parameters() if any(nd in n for nd in no_decay)],
-                'lr': encoder_lr, 'weight_decay': 0.0},
-                {'params': [p for n, p in model.named_parameters() if "model" not in n],
-                'lr': decoder_lr, 'weight_decay': 0.0}
-            ]
-            return optimizer_parameters
+        param_optimizer = list(model.named_parameters())
+        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
+        optimizer_parameters = [
+            {'params': [p for n, p in model.model.named_parameters() if not any(nd in n for nd in no_decay)],
+             'lr': encoder_lr, 'weight_decay': weight_decay},
+            {'params': [p for n, p in model.model.named_parameters() if any(nd in n for nd in no_decay)],
+             'lr': encoder_lr, 'weight_decay': 0.0},
+            {'params': [p for n, p in model.named_parameters() if "model" not in n],
+             'lr': decoder_lr, 'weight_decay': 0.0}
+        ]
+        return optimizer_parameters
 
     optimizer_parameters = get_optimizer_params(model,
                                                 encoder_lr=cfg.training.encoder_lr, 
@@ -95,14 +100,11 @@ def train_loop(cfg, df, fold):
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer, num_warmup_steps=cfg.scheduler.num_warmup_steps, num_training_steps=num_train_steps, num_cycles=cfg.scheduler.num_cycles
             )
-        else:
-            scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0=cfg.training.t_0, 
-                                                             eta_min=cfg.training.min_lr)
         return scheduler
     
-    num_train_steps = int(cfg.cv_strategy.num_split / cfg.training.batch_size * cfg.training.epochs)
+    num_train_steps = int(len(train_df) / cfg.training.batch_size * cfg.training.epochs)
     scheduler = get_scheduler(cfg, optimizer, num_train_steps)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.SmoothL1Loss(reduction='mean') # RMSELoss(reduction="mean")
 
     best_score = 100.
     for epoch in range(cfg.training.epochs):
@@ -112,7 +114,7 @@ def train_loop(cfg, df, fold):
         avg_val_loss, predictions = valid_fn(cfg, valid_loader, model, criterion, device)
         
         # scoring
-        score = get_score(valid_labels, predictions)
+        score, scores = get_score(valid_labels, predictions)
 
         elapsed = time.time() - start_time
 
@@ -133,7 +135,7 @@ def train_loop(cfg, df, fold):
     predictions = torch.load(cfg.data.output_dir_path + "/" + f"{cfg.model.model_name.replace('/', '-')}_fold{fold}_best.pth", 
                              map_location=torch.device('cpu'))['predictions']
     
-    valid_df[['pred_0','pred_1','pred_2']] = predictions
+    valid_df[[f"pred_{c}" for c in cfg.dataset.target_cols]] = predictions
 
     torch.cuda.empty_cache()
     gc.collect()
@@ -148,41 +150,24 @@ if __name__ == "__main__":
     os.makedirs(cfg.data.output_dir_path, exist_ok=True)
 
     df = pd.read_csv(cfg.data.train_data_path)
-    df['essay_text'] = df['essay_id'].apply(lambda x: get_essay(x, is_train=True))
-    df['discourse_text'] = df['discourse_text'].apply(lambda x: resolve_encodings_and_normalize(x))
-    df['essay_text'] = df['essay_text'].apply(lambda x: resolve_encodings_and_normalize(x))
-    df['essay_text'] = df['essay_text'].str.lower()
-    df['discourse_text'] = df['discourse_text'].str.lower()
-    df['discourse_type'] = df['discourse_type'].str.lower()
-    df['target'] = df['discourse_effectiveness'].map(LABEL_MAPPING)
-    df['grp_var'] = df['discourse_type'] + df['discourse_effectiveness']
-    ## debug flag
-    if cfg.training.debug:
-        df = df[:1000]
-    
-    ## make fold
-    # gkf = StratifiedGroupKFold(n_splits=cfg.cv_strategy.num_split)
-    # for fold, ( _, val_) in enumerate(gkf.split(df.grp_var,df.essay_id)):
-    #     df.loc[val_ , "kfold"] = int(fold)
-    # gkf = KFold(n_splits=CFG.n_fold)
 
-    # gkf = GroupKFold(n_splits=CFG.n_fold)
-    gkf = StratifiedKFold(n_splits=cfg.cv_strategy.num_split, shuffle=True, random_state=cfg.cv_strategy.seed)
-    # gkf = StratifiedGroupKFold(n_splits=CFG.n_fold)
-    for fold, (train_id, val_id) in enumerate(gkf.split(X=df, y=df.discourse_effectiveness, groups=df.essay_id)):
-        # For all row in val_id list => create kfold column value
-        df.loc[val_id , "kfold"] = fold
-
-    df["kfold"] = df["kfold"].astype(int)
-    LOGGER.info(df.groupby('kfold')['discourse_effectiveness'].value_counts())
+    Fold = MultilabelStratifiedKFold(n_splits=cfg.cv_strategy.num_split, shuffle=True, random_state=cfg.cv_strategy.seed)
+    for n, (train_index, val_index) in enumerate(Fold.split(df, df[cfg.dataset.target_cols])):
+        df.loc[val_index, 'kfold'] = int(n)
+    df['kfold'] = df['kfold'].astype(int)
 
     oof_df = pd.DataFrame()
+    print("\n")
+    LOGGER.info(f"========== model name: {cfg.model.model_name} ==========")
     for fold in range(cfg.cv_strategy.num_split):
         _oof_df = train_loop(cfg, df, fold)
         oof_df = pd.concat([oof_df, _oof_df])
         LOGGER.info(f"========== fold: {fold} result ==========")
-        get_result(_oof_df)
+        score, scores = get_result(_oof_df)
+        LOGGER.info(f'Score: {score:<.4f}  Scores: {scores}')
+
     oof_df= oof_df.reset_index(drop=False)
-    get_result(oof_df)
+    score, scores = get_result(oof_df)
+    LOGGER.info(f'Final Score: {score:<.4f}  Scores: {scores}')
     oof_df.to_pickle(cfg.data.output_dir_path + "/oof_df.pkl")
     wandb.finish()
