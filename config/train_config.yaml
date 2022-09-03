@@ -9,20 +9,25 @@ cv_strategy:
   seed: 42
   num_split: 4
   shuffle: true
+  split_type: "multi_label_skfold"
 model:
-  model_name: "microsoft/deberta-v3-base"
+  model_name: "microsoft/deberta-v2-xlarge"
 tokenizer:
   tokenizer_name: ${model.model_name}
 dataset:
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
   max_len: 512
   train: true
   target_cols: ['cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar', 'conventions']
+  input_col: 'full_txt'
 scheduler:
   scheduler_name: "cosine"
   num_warmup_steps: 0
   num_cycles: 0.5
+optimizer:
+  opt_mode: 'specific'
+  learning_rate: 0.00002
 training:
   dropout: 0.2
   debug: false

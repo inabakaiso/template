@@ -1,11 +1,14 @@
 from src.pachage_list import *
 from src.utils import *
-from dataset.dataset import *
 from src.train_function import *
 from src.preprocess import *
+from src.awp import *
+from src.calc_score import *
+from src.get_optimizer import *
+from src.create_folds import *
+from dataset.dataset import *
 from model.model import *
-from typing import Optional
-import yaml
+
 
 NUM_JOBS = 12
 
@@ -28,11 +31,12 @@ def train_loop(cfg, df, fold):
                      group=cfg.model.model_name,
                      job_type="train",
                      anonymous=anony)
+    
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name)
     SEP = tokenizer.sep_token
 
     lengths = []
-    tk0 = tqdm(df['full_text'].fillna("").values, total=len(df))
+    tk0 = tqdm(df[cfg.dataset.input_col].fillna("").values, total=len(df))
     for text in tk0:
         length = len(tokenizer(text, add_special_tokens=False)['input_ids'])
         lengths.append(length)
@@ -52,7 +56,7 @@ def train_loop(cfg, df, fold):
                               shuffle=True,
                               num_workers=cfg.dataset.num_workers, pin_memory=True, drop_last=True)
     valid_loader = DataLoader(valid_dataset,
-                              batch_size=cfg.dataset.batch_size * 2,
+                              batch_size=cfg.dataset.batch_size,
                               shuffle=False,
                               num_workers=cfg.dataset.num_workers, pin_memory=True, drop_last=False)
 
@@ -64,29 +68,8 @@ def train_loop(cfg, df, fold):
     )
     model.to(device)
 
-    def get_optimizer_params(model, encoder_lr, decoder_lr, weight_decay=0.0):
-        param_optimizer = list(model.named_parameters())
-        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-        optimizer_parameters = [
-            {'params': [p for n, p in model.model.named_parameters() if not any(nd in n for nd in no_decay)],
-             'lr': encoder_lr, 'weight_decay': weight_decay},
-            {'params': [p for n, p in model.model.named_parameters() if any(nd in n for nd in no_decay)],
-             'lr': encoder_lr, 'weight_decay': 0.0},
-            {'params': [p for n, p in model.named_parameters() if "model" not in n],
-             'lr': decoder_lr, 'weight_decay': 0.0}
-        ]
-        return optimizer_parameters
-
-    optimizer_parameters = get_optimizer_params(model,
-                                                encoder_lr=cfg.training.encoder_lr, 
-                                                decoder_lr=cfg.training.decoder_lr,
-                                                weight_decay=cfg.training.weight_decay)
+    optimizer_parameters = get_optimizer_grouped_parameters(model=model, mode=cfg.optimizer.opt_mode, learning_rate=cfg.optimizer.learning_rate)
     optimizer = AdamW(optimizer_parameters, lr=cfg.training.encoder_lr, eps=cfg.training.eps, betas=(0.9, 0.999))
-
-    # optimizer = AdamW(model.parameters(), 
-    #                   lr=cfg.training.encoder_lr,
-    #                   eps=cfg.training.eps, 
-    #                   betas=(0.9, 0.999))  
 
     # ====================================================
     # scheduler
@@ -143,7 +126,7 @@ def train_loop(cfg, df, fold):
     return valid_df
 
 if __name__ == "__main__":
-    with open('train_config.yaml', 'r') as yml:
+    with open('config/train_config.yaml', 'r') as yml:
         cfg = DictConfig(yaml.safe_load(yml))
     seed_everything(cfg.cv_strategy.seed)
 
@@ -151,10 +134,8 @@ if __name__ == "__main__":
 
     df = pd.read_csv(cfg.data.train_data_path)
 
-    Fold = MultilabelStratifiedKFold(n_splits=cfg.cv_strategy.num_split, shuffle=True, random_state=cfg.cv_strategy.seed)
-    for n, (train_index, val_index) in enumerate(Fold.split(df, df[cfg.dataset.target_cols])):
-        df.loc[val_index, 'kfold'] = int(n)
-    df['kfold'] = df['kfold'].astype(int)
+    ## create folds
+    df = create_folds(df, cfg.cv_strategy.num_folds,cfg.cv_strategy.seed, target_cols=cfg.dataset.target_cols, split_type=cfg.cv_strategy.split_type)
 
     oof_df = pd.DataFrame()
     print("\n")

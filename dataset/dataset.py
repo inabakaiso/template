@@ -19,7 +19,7 @@ def prepare_input(cfg, text, tokenizer, max_len):
 class FeedbackDataset(Dataset):
     def __init__(self, cfg, df, max_len, tokenizer):
         self.cfg = cfg
-        self.texts = df['full_text'].values
+        self.texts = df[cfg.dataset.input_col].values
         self.labels = df[cfg.dataset.target_cols].values
         self.max_len = max_len
         self.tokenizer = tokenizer
