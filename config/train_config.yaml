@@ -20,7 +20,7 @@ dataset:
   max_len: 512
   train: true
   target_cols: ['cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar', 'conventions']
-  input_col: 'full_txt'
+  input_col: 'full_text'
 scheduler:
   scheduler_name: "cosine"
   num_warmup_steps: 0

@@ -135,7 +135,7 @@ if __name__ == "__main__":
     df = pd.read_csv(cfg.data.train_data_path)
 
     ## create folds
-    df = create_folds(df, cfg.cv_strategy.num_folds,cfg.cv_strategy.seed, target_cols=cfg.dataset.target_cols, split_type=cfg.cv_strategy.split_type)
+    df = create_folds(df, cfg.cv_strategy.num_split,cfg.cv_strategy.seed, target_cols=cfg.dataset.target_cols, split_type=cfg.cv_strategy.split_type)
 
     oof_df = pd.DataFrame()
     print("\n")

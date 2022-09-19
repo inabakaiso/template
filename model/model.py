@@ -12,13 +12,14 @@ class MeanPooling(nn.Module):
         sum_mask = torch.clamp(sum_mask, min=1e-9)
         mean_embeddings = sum_embeddings / sum_mask
         return mean_embeddings
+    
 
 class CustomModel(nn.Module):
     def __init__(self, cfg, config_path=None, pretrained=False):
         super().__init__()
         self.cfg = cfg
         if config_path is None:
-            self.config = AutoConfig.from_pretrained(cfg.model.model_name, output_hidden_states=True)
+            self.config = AutoConfig.from_pretrained(cfg.model, output_hidden_states=True)
             self.config.hidden_dropout = 0.
             self.config.hidden_dropout_prob = 0.
             self.config.attention_dropout = 0.
@@ -26,10 +27,10 @@ class CustomModel(nn.Module):
         else:
             self.config = torch.load(config_path)
         if pretrained:
-            self.model = AutoModel.from_pretrained(cfg.model.model_name, config=self.config)
+            self.model = AutoModel.from_pretrained(cfg.model, config=self.config)
         else:
             self.model = AutoModel(self.config)
-        if self.cfg.training.gradient_checkpoint:
+        if self.cfg.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.pool = MeanPooling()
         self.fc = nn.Linear(self.config.hidden_size, 6)

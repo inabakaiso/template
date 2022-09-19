@@ -15,8 +15,7 @@ def train_fn(cfg, fold, train_loader, model, criterion, optimizer, epoch, schedu
         labels = labels.to(device)
         batch_size = labels.size(0)
         with torch.cuda.amp.autocast(enabled=cfg.training.apex):
-            y_preds = model(inputs)
-            loss = criterion(y_preds, labels)
+            _, loss = model(inputs, labels)
         if cfg.training.gradient_accumulation_steps > 1:
             loss = loss / cfg.training.gradient_accumulation_steps
         losses.update(loss.item(), batch_size)
@@ -58,8 +57,7 @@ def valid_fn(cfg, valid_loader, model, criterion, device):
             inputs[k] = v.to(device)
         labels = labels.to(device)
         batch_size = labels.size(0)
-        y_preds = model(inputs)
-        loss = criterion(y_preds, labels)
+        y_preds, loss = model(inputs, labels)
         if cfg.training.gradient_accumulation_steps > 1:
             loss = loss / cfg.training.gradient_accumulation_steps
         losses.update(loss.item(), batch_size)
